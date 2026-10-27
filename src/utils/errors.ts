@@ -3,6 +3,7 @@ import * as z from "zod";
 export const toolErrorCodeSchema = z.enum([
   "VAULT_NOT_FOUND",
   "PATH_REJECTED",
+  "ACCESS_DENIED",
   "SYMLINK_NOT_ALLOWED",
   "NOTE_NOT_FOUND",
   "ALREADY_EXISTS",

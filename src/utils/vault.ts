@@ -12,12 +12,14 @@ export { sha256 } from "./hash.js";
 export interface VaultDefinition {
   id: string;
   root: string;
+  deniedFolders?: readonly string[];
 }
 
 export interface ResolvedVault {
   id: string;
   root: string;
   stateRoot: string;
+  deniedFolders?: readonly string[];
 }
 
 export interface VaultEntry {
@@ -135,7 +137,14 @@ export class VaultRegistry {
       byId.set(definition.id, {
         id: definition.id,
         root,
-        stateRoot: path.join(root, INTERNAL_DIRECTORY)
+        stateRoot: path.join(root, INTERNAL_DIRECTORY),
+        ...(definition.deniedFolders === undefined
+          ? {}
+          : {
+              deniedFolders: Object.freeze(
+                await resolveDeniedFolders(root, definition.deniedFolders)
+              )
+            })
       });
     }
 
@@ -229,7 +238,9 @@ export class VaultFs {
     if (first !== undefined && RESERVED_ROOTS.has(first)) {
       throw new ToolFailure("PATH_REJECTED", `The '${first}' directory is reserved.`);
     }
-    return parts.join("/");
+    const normalized = parts.join("/");
+    assertVaultPathAllowed(this.vault, path.join(this.vault.root, ...parts));
+    return normalized;
   }
 
   async resolveExisting(
@@ -263,6 +274,7 @@ export class VaultFs {
   }
 
   async readBytes(entry: VaultEntry): Promise<Buffer> {
+    await this.assertComponentsSafe(entry.absolutePath, true);
     try {
       const bytes = await fs.readFile(entry.absolutePath);
       if (bytes.byteLength > MAX_CONTENT_BYTES) {
@@ -299,6 +311,7 @@ export class VaultFs {
     for await (const dirent of handle) {
       if (dirent.name.startsWith(".")) continue;
       const absolutePath = path.join(directory, dirent.name);
+      if (isDeniedPath(this.vault, path.relative(this.vault.root, absolutePath))) continue;
       if (dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
         await this.walk(absolutePath, output);
@@ -312,6 +325,7 @@ export class VaultFs {
   }
 
   private async assertComponentsSafe(target: string, requireTarget: boolean): Promise<void> {
+    assertVaultPathAllowed(this.vault, target);
     if (!contains(this.vault.root, target)) {
       throw new ToolFailure("PATH_REJECTED", "Path resolves outside the configured vault.");
     }
@@ -330,6 +344,9 @@ export class VaultFs {
             "Symlinks and junctions are not allowed in tool paths."
           );
         }
+        if (this.vault.deniedFolders?.length) {
+          assertVaultPathAllowed(this.vault, await fs.realpath(current));
+        }
       } catch (error) {
         if (isNodeError(error) && error.code === "ENOENT") {
           if (requireTarget) {
@@ -340,6 +357,73 @@ export class VaultFs {
         throw error;
       }
     }
+  }
+}
+
+export function normalizeDeniedFolder(input: string): string {
+  const parts = input.split("/");
+  if (
+    input.includes("\0") ||
+    input.includes("\\") ||
+    input.includes(":") ||
+    path.isAbsolute(input) ||
+    windowsAbsolutePattern.test(input) ||
+    parts.some((part) => !part || part === "." || part === ".." || /[. ]$/u.test(part)) ||
+    RESERVED_ROOTS.has(parts[0]?.toLowerCase() ?? "")
+  ) {
+    throw new ToolFailure(
+      "INVALID_ARGUMENT",
+      "Denied folders must be portable vault-relative directory paths without dot segments or reserved roots."
+    );
+  }
+  return parts.join("/");
+}
+
+async function resolveDeniedFolders(root: string, folders: readonly string[]): Promise<string[]> {
+  const output = new Set<string>();
+  for (const folder of folders) {
+    const normalized = normalizeDeniedFolder(folder);
+    output.add(normalized);
+    try {
+      const real = await fs.realpath(path.join(root, ...normalized.split("/")));
+      if (contains(root, real)) output.add(path.relative(root, real).split(path.sep).join("/"));
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+    }
+  }
+  return [...output];
+}
+
+export function isDeniedPath(vault: ResolvedVault, relativePath: string): boolean {
+  // Conservative matching also covers case and trailing-dot/space aliases on Windows.
+  const key = (value: string): string =>
+    value
+      .split(/[\\/]/u)
+      .map((part) =>
+        part
+          .normalize("NFC")
+          .toLowerCase()
+          .replace(/[. ]+$/u, "")
+      )
+      .join("/");
+  const candidate = key(relativePath);
+  return (
+    vault.deniedFolders?.some((folder) => {
+      const denied = key(folder);
+      return candidate === denied || candidate.startsWith(`${denied}/`);
+    }) ?? false
+  );
+}
+
+export function assertVaultPathAllowed(vault: ResolvedVault, target: string): void {
+  if (!contains(vault.root, target)) {
+    throw new ToolFailure("PATH_REJECTED", "Path resolves outside the configured vault.");
+  }
+  if (isDeniedPath(vault, path.relative(vault.root, target))) {
+    throw new ToolFailure(
+      "ACCESS_DENIED",
+      "Access to this path is restricted by the vault configuration."
+    );
   }
 }
 

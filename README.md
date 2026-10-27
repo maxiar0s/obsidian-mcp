@@ -54,6 +54,37 @@ obsidian-mcp serve \
 
 Network, removable, hidden, and synced locations are allowed because an explicit `--vault` is treated as authorization; the same containment protections apply to every location.
 
+### Restrict folders within a vault
+
+Repeat `--deny-folder <vault-id>=<relative/folder>` to hide folders and their descendants from this MCP server:
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "obsidian-mcp",
+      "args": [
+        "serve",
+        "--vault",
+        "notes=C:/Obsidian/MyVault",
+        "--deny-folder",
+        "notes=Private",
+        "--deny-folder",
+        "notes=Work/Confidential"
+      ]
+    }
+  }
+}
+```
+
+Paths are relative to the specified vault and use `/`, including on Windows. Rules apply only to that vault, may precede `--vault`, and can name folders that do not exist yet. Invalid rules or unknown vault ids prevent startup. Absolute paths, backslashes, dot segments, trailing dots/spaces, and reserved roots are rejected. Rules match whole path segments, conservatively ignoring case and Unicode normalization: `Private` also blocks `private`, but not `Private-other`. Without this option, existing access is unchanged.
+
+Direct reads, writes, directory creation, moves, deletion, and tag changes return `ACCESS_DENIED`. Searches and vault-wide tag/backlink operations skip restricted subtrees without opening them. Links in restricted notes are therefore not updated when an allowed note moves or is deleted.
+
+Use the same rules for `doctor`, `recovery list`, and `recovery restore`. Recovery cannot restore restricted paths; an incomplete transaction targeting one prevents startup without restoring any path in that transaction. Resolve such recovery manually with the server stopped. Rules are startup configuration, not agent-changeable tool arguments; restart the MCP server after changing them.
+
+This is an MCP access restriction, **not an operating-system sandbox**. It cannot block another tool, terminal, or process from accessing files, nor redact sensitive text or hard-linked copies already present in allowed notes. Use filesystem permissions or process isolation for that stronger boundary.
+
 ## Design principles
 
 - Vault access is explicitly allowlisted at process startup.

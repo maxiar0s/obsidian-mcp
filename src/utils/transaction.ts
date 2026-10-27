@@ -5,7 +5,7 @@ import path from "node:path";
 import { ToolFailure } from "./errors.js";
 import { sha256 } from "./hash.js";
 import type { Logger } from "./logger.js";
-import { contains, type ResolvedVault } from "./vault.js";
+import { assertVaultPathAllowed, contains, type ResolvedVault } from "./vault.js";
 
 export type PlannedChange =
   | {
@@ -126,6 +126,7 @@ export class TransactionManager {
       throw new ToolFailure("INVALID_ARGUMENT", "Recovery entry is unavailable or incomplete.");
     }
     const changes: PlannedChange[] = [];
+    await this.assertSnapshotsAllowed(manifest.snapshots);
     for (const snapshot of [...manifest.snapshots].reverse()) {
       const target = path.join(this.vault.root, ...snapshot.path.split("/"));
       this.assertManagedPath(target);
@@ -400,6 +401,7 @@ export class TransactionManager {
     transactionRoot: string,
     snapshots: readonly Snapshot[]
   ): Promise<void> {
+    await this.assertSnapshotsAllowed(snapshots);
     for (const snapshot of [...snapshots].reverse()) {
       const target = path.join(this.vault.root, ...snapshot.path.split("/"));
       if (!(await this.wasApplied(target, snapshot))) continue;
@@ -419,6 +421,14 @@ export class TransactionManager {
       await fs.mkdir(path.dirname(target), { recursive: true });
       await atomicWrite(target, bytes, await exists(target), snapshot.mode);
       snapshot.phase = "pending";
+    }
+  }
+
+  private async assertSnapshotsAllowed(snapshots: readonly Snapshot[]): Promise<void> {
+    for (const snapshot of snapshots) {
+      const target = path.join(this.vault.root, ...snapshot.path.split("/"));
+      this.assertManagedPath(target);
+      await this.assertNoSymlinkComponents(target);
     }
   }
 
@@ -581,6 +591,7 @@ export class TransactionManager {
   }
 
   private assertManagedPath(target: string): void {
+    assertVaultPathAllowed(this.vault, target);
     const trashRoot = path.join(this.vault.stateRoot, "trash");
     if (
       !contains(this.vault.root, target) ||
@@ -605,6 +616,9 @@ export class TransactionManager {
             "SYMLINK_NOT_ALLOWED",
             "A path component became a symlink before the transaction committed."
           );
+        }
+        if (this.vault.deniedFolders?.length) {
+          assertVaultPathAllowed(this.vault, await fs.realpath(current));
         }
       } catch (error) {
         if (error instanceof Error && "code" in error && error.code === "ENOENT") return;

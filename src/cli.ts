@@ -19,7 +19,7 @@ import {
   writeDiagnostic
 } from "./utils/diagnostics.js";
 import { Logger, type LogLevel } from "./utils/logger.js";
-import { VaultRegistry, type VaultDefinition } from "./utils/vault.js";
+import { normalizeDeniedFolder, VaultRegistry, type VaultDefinition } from "./utils/vault.js";
 
 type Command = "serve" | "doctor" | "recovery-list" | "recovery-restore";
 
@@ -190,6 +190,7 @@ export function parseArguments(args: string[]): CliOptions | "help" | "version" 
   }
 
   const vaults: VaultDefinition[] = [];
+  const deniedFolders = new Map<string, string[]>();
   let recoveryDays = DEFAULT_RECOVERY_DAYS;
   let recoveryMaxBytes = DEFAULT_RECOVERY_BYTES;
   let logLevel: LogLevel = "info";
@@ -231,6 +232,24 @@ export function parseArguments(args: string[]): CliOptions | "help" | "version" 
       const vault = parseVault(value);
       vaults.push(vault);
       canonicalArgs.push(flag, `${vault.id}=${vault.root}`);
+    } else if (flag === "--deny-folder") {
+      const separator = value.indexOf("=");
+      const id = value.slice(0, separator);
+      let folder: string;
+      try {
+        if (separator <= 0) throw new Error("Missing vault id.");
+        folder = normalizeDeniedFolder(value.slice(separator + 1));
+      } catch {
+        throw usageError(
+          "CLI_INVALID_DENY_FOLDER",
+          "The denied folder is invalid.",
+          value,
+          "Use --deny-folder <vault-id>=<relative/folder>, without absolute paths, backslashes, dot segments, or reserved roots.",
+          "diagnostic-reference"
+        );
+      }
+      deniedFolders.set(id, [...(deniedFolders.get(id) ?? []), folder]);
+      canonicalArgs.push(flag, `${id}=${folder}`);
     } else if (flag === "--recovery-days") {
       recoveryDays = parsePositiveInteger(value, flag);
       canonicalArgs.push(flag, value);
@@ -297,6 +316,20 @@ export function parseArguments(args: string[]): CliOptions | "help" | "version" 
       `Remove vault arguments until no more than ${MAX_VAULTS} remain.`,
       "diagnostic-reference"
     );
+  }
+  for (const [id, folders] of deniedFolders) {
+    if (!vaults.some((vault) => vault.id === id)) {
+      throw usageError(
+        "CLI_UNKNOWN_DENY_VAULT",
+        "A denied folder references an unconfigured vault.",
+        id,
+        "Use a vault id configured with --vault in the same command.",
+        "diagnostic-reference"
+      );
+    }
+    for (const vault of vaults) {
+      if (vault.id === id) vault.deniedFolders = folders;
+    }
   }
   return {
     command,
@@ -550,6 +583,7 @@ Compatibility:
 
 Options:
   --vault <id>=<path>          Configure one vault (required, repeatable, maximum 10)
+  --deny-folder <id>=<folder>  Deny a vault-relative folder and descendants (repeatable)
   --recovery-days <days>       Completed journal retention (default: 30)
   --recovery-max-bytes <bytes> Recovery storage limit (default: 1073741824)
   --log-level <level>          error, warn, info, or debug

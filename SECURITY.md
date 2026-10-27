@@ -18,3 +18,7 @@ Avoid including real vault contents or personal filesystem paths. Maintainers sh
 ## Security boundary
 
 An explicit `--vault id=/absolute/path` grants this local process read/write access to that root. MCP tool paths must remain within it. The server does not authenticate local stdio clients; the launching MCP host controls who can invoke the process and which vault arguments it receives.
+
+Repeat `--deny-folder id=relative/folder` to restrict directories and descendants within a configured vault. Direct access and transaction/recovery targets are denied; recursive searches and global tag/backlink edits skip those subtrees. Matching is segment-aware and conservatively case-insensitive. Keep the same restrictions on every invocation, including recovery commands. The MCP client must restart the server to apply configuration changes.
+
+These rules do not sandbox the process or other agent tools. Allowed notes may already contain copied sensitive text, links, or hard links to restricted content. Concurrent local filesystem modifications can race path checks; use OS-level permissions or isolation when untrusted processes can modify the vault.
