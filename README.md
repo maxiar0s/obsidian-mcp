@@ -140,6 +140,14 @@ obsidian-mcp recovery restore --vault work=/path --id <transaction-id>
 
 Recovery refuses to overwrite content changed since the selected transaction. Permanent deletion snapshots are purged after commit and cannot be restored.
 
+### Multiple MCP instances and leftover write locks
+
+Instances on the same computer serialize writes using `.obsidian-mcp/locks/write`; another instance waits up to ten seconds rather than writing concurrently. A live owner's lock is never removed just because it is old. Locks whose owner process is confirmed dead retain the existing recovery behavior.
+
+If a process stops between creating the lock directory and writing `owner.json`, an empty lock is automatically removed after a one-second creation grace period. Removal is non-recursive: if an owner or any other file appears, recovery refuses to remove it. An instance that loses its empty directory before publishing ownership retries instead of writing without a lock.
+
+Missing or invalid owner metadata with nonempty lock contents produces an actionable `LOCK_TIMEOUT` error. Stop all MCP instances using the vault before inspecting that directory; do not remove a lock belonging to an active writer. These local-process locks do not coordinate writers on different computers through a synced or network drive.
+
 ## Path and filesystem safety
 
 The server:

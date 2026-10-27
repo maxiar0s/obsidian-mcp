@@ -521,8 +521,10 @@ export class TransactionManager {
     const lock = path.join(this.vault.stateRoot, "locks", "write");
     const started = Date.now();
     while (true) {
+      let created = false;
       try {
         await fs.mkdir(lock);
+        created = true;
         await fs.writeFile(
           path.join(lock, "owner.json"),
           JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }),
@@ -537,16 +539,19 @@ export class TransactionManager {
           await fs.rm(lock, { recursive: true, force: true });
         };
       } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
-        if (await this.clearVerifiedDeadLock(lock)) continue;
+        if (!(
+          error instanceof Error &&
+          "code" in error &&
+          (error.code === "EEXIST" || (created && error.code === "ENOENT"))
+        ))
+          throw error;
+        // An empty lock can disappear between mkdir and publishing its owner.
+        // Only a successfully published owner may enter the critical section.
+        if (error.code === "EEXIST" && (await this.clearVerifiedDeadLock(lock))) continue;
         if (Date.now() - started >= 10_000) {
-          throw new ToolFailure(
-            "LOCK_TIMEOUT",
-            "Another process is modifying this vault. Try again shortly.",
-            {
-              retryable: true
-            }
-          );
+          throw new ToolFailure("LOCK_TIMEOUT", await this.lockTimeoutMessage(lock), {
+            retryable: true
+          });
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
@@ -554,8 +559,17 @@ export class TransactionManager {
   }
 
   private async clearVerifiedDeadLock(lock: string): Promise<boolean> {
+    let text: string;
     try {
-      const owner = JSON.parse(await fs.readFile(path.join(lock, "owner.json"), "utf8")) as {
+      text = await fs.readFile(path.join(lock, "owner.json"), "utf8");
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        return this.clearEmptyLock(lock);
+      }
+      return false;
+    }
+    try {
+      const owner = JSON.parse(text) as {
         pid?: unknown;
       };
       if (!Number.isSafeInteger(owner.pid) || Number(owner.pid) <= 0) return false;
@@ -571,6 +585,35 @@ export class TransactionManager {
     } catch {
       return false;
     }
+  }
+
+  private async clearEmptyLock(lock: string): Promise<boolean> {
+    try {
+      // Leave time for a process between mkdir and writeFile to publish its owner.
+      const stat = await fs.lstat(lock);
+      if (!stat.isDirectory() || Date.now() - stat.mtimeMs < 1_000) return false;
+      // Never recursively delete an unowned lock. rmdir atomically refuses if
+      // an owner or any unknown file appeared, even after the age check.
+      await fs.rmdir(lock);
+      this.logger.log("warn", "empty_lock_removed", { vault: this.vault.id });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async lockTimeoutMessage(lock: string): Promise<string> {
+    try {
+      const owner = JSON.parse(await fs.readFile(path.join(lock, "owner.json"), "utf8")) as {
+        pid?: unknown;
+      };
+      if (Number.isSafeInteger(owner.pid) && Number(owner.pid) > 0) {
+        return "Another process is modifying this vault. Try again shortly.";
+      }
+    } catch {
+      // Missing or malformed ownership is not evidence that another writer exists.
+    }
+    return "The vault write lock has missing or invalid owner metadata. Stop all MCP instances using this vault, then inspect .obsidian-mcp/locks/write before removing a leftover lock. Unknown lock contents are preserved.";
   }
 
   private async enqueue<T>(task: () => Promise<T>): Promise<T> {
