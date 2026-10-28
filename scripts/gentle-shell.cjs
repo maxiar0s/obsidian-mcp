@@ -12,7 +12,7 @@ const args = process.argv.slice(2).map((arg) =>
 );
 
 const main = path.resolve(__dirname, "../dist/main.js");
-process.argv = [process.execPath, main, "serve", ...args];
+process.argv = [process.execPath, main, ...(args[0] === "serve" ? args : ["serve", ...args])];
 
 import(pathToFileURL(main).href).catch((error) => {
   console.error(error);
